@@ -14,6 +14,78 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 $action = $_GET['action'] ?? '';
 $pdo = Database::connect();
 
+function detectBot($pdo, $ip, $userAgent, &$botType, &$botReason, &$botEvidence)
+{
+    $botType = '';
+    $botReason = '';
+    $botEvidence = [];
+    $ua = strtolower($userAgent ?? '');
+
+    $searchEngineKeywords = [
+        'googlebot' => 'Google 搜索引擎爬虫',
+        'bingbot' => 'Bing 搜索引擎爬虫',
+        'baiduspider' => '百度搜索引擎爬虫',
+        'yandexbot' => 'Yandex 搜索引擎爬虫',
+        'sogou' => '搜狗搜索引擎爬虫',
+        '360spider' => '360 搜索引擎爬虫',
+        'bytespider' => '字节跳动搜索引擎爬虫',
+        'duckduckbot' => 'DuckDuckGo 搜索引擎爬虫',
+        'applebot' => 'Apple 搜索引擎爬虫',
+        'slurp' => 'Yahoo 搜索引擎爬虫',
+    ];
+    foreach ($searchEngineKeywords as $kw => $desc) {
+        if (strpos($ua, $kw) !== false) {
+            $botType = 'search_engine';
+            $botReason = $desc;
+            $botEvidence['ua_match'] = $kw;
+            return true;
+        }
+    }
+
+    $stressKeywords = [
+        'apachebench' => '压测工具 ApacheBench',
+        'wrk' => '压测工具 wrk',
+        'jmeter' => '压测工具 JMeter',
+        'loadrunner' => '压测工具 LoadRunner',
+        'locust' => '压测工具 Locust',
+        'go-http-client' => '压测脚本/工具',
+        'python-requests' => '脚本请求（疑似压测）',
+        'curl/' => '脚本请求（疑似压测）',
+        'httpclient' => '压测脚本/工具',
+    ];
+    foreach ($stressKeywords as $kw => $desc) {
+        if (strpos($ua, $kw) !== false) {
+            $botType = 'stress_tool';
+            $botReason = $desc;
+            $botEvidence['ua_match'] = $kw;
+            return true;
+        }
+    }
+
+    if ($ip) {
+        $oneMinAgo = date('Y-m-d H:i:s', time() - 60);
+        $stmt = $pdo->prepare("SELECT COUNT(*) FROM visitors WHERE ip = :ip AND created_at >= :t");
+        $stmt->execute([':ip' => $ip, ':t' => $oneMinAgo]);
+        $cnt = (int)$stmt->fetchColumn();
+        if ($cnt >= 10) {
+            $botType = 'malicious_refresh';
+            $botReason = "1 分钟内同 IP 请求 {$cnt} 次，判定为恶意刷新/高频访问";
+            $botEvidence['ip'] = $ip;
+            $botEvidence['requests_last_60s'] = $cnt;
+            return true;
+        }
+    }
+
+    if (empty($ua) || $ua === '' || strlen($ua) < 10) {
+        $botType = 'malicious_refresh';
+        $botReason = 'User-Agent 异常（空或过短）';
+        $botEvidence['ua_length'] = strlen($ua);
+        return true;
+    }
+
+    return false;
+}
+
 try {
     switch ($action) {
         case 'collect':
@@ -56,10 +128,15 @@ try {
                 }
             }
 
-            // 补全服务端信息
+            $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? '';
+            $botType = '';
+            $botReason = '';
+            $botEvidence = [];
+            $isBot = detectBot($pdo, $ip, $userAgent, $botType, $botReason, $botEvidence) ? 1 : 0;
+
             $data = [
                 ':ip' => $ip,
-                ':user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? '',
+                ':user_agent' => $userAgent,
                 ':country' => $country,
                 ':city' => $city,
                 ':isp' => $isp,
@@ -86,7 +163,14 @@ try {
                 ':connection_type' => $input['connection_type'] ?? '',
 
                 ':referrer' => $input['referrer'] ?? '',
-                ':remark' => ''
+                ':remark' => '',
+
+                ':is_bot' => $isBot,
+                ':bot_type' => $botType,
+                ':bot_reason' => $botReason,
+                ':bot_evidence' => json_encode($botEvidence, JSON_UNESCAPED_UNICODE),
+                ':bot_verified_by' => $isBot ? 'system_auto' : '',
+                ':bot_verified_at' => $isBot ? date('Y-m-d H:i:s') : null,
             ];
 
             $sql = "INSERT INTO visitors (
@@ -95,14 +179,16 @@ try {
                 screen_width, screen_height, window_width, window_height,
                 language, timezone, platform, cookie_enabled,
                 touch_points, device_memory, cpu_cores, connection_type,
-                referrer, remark
+                referrer, remark,
+                is_bot, bot_type, bot_reason, bot_evidence, bot_verified_by, bot_verified_at
             ) VALUES (
                 :ip, :user_agent, :country, :city, :isp,
                 :browser, :browser_version, :os, :os_version, :device_type,
                 :screen_width, :screen_height, :window_width, :window_height,
                 :language, :timezone, :platform, :cookie_enabled,
                 :touch_points, :device_memory, :cpu_cores, :connection_type,
-                :referrer, :remark
+                :referrer, :remark,
+                :is_bot, :bot_type, :bot_reason, :bot_evidence, :bot_verified_by, :bot_verified_at
             )";
 
             $stmt = $pdo->prepare($sql);
@@ -116,6 +202,7 @@ try {
             $limit = 20;
             $offset = ($page - 1) * $limit;
             $search = $_GET['search'] ?? '';
+            $botFilter = $_GET['bot_filter'] ?? 'all';
 
             $where = "WHERE 1=1";
             $params = [];
@@ -124,13 +211,16 @@ try {
                 $where .= " AND (ip LIKE :search OR remark LIKE :search OR city LIKE :search)";
                 $params[':search'] = "%$search%";
             }
+            if ($botFilter === 'real') {
+                $where .= " AND is_bot = 0";
+            } elseif ($botFilter === 'bot') {
+                $where .= " AND is_bot = 1";
+            }
 
-            // count
             $countStmt = $pdo->prepare("SELECT COUNT(*) FROM visitors $where");
             $countStmt->execute($params);
             $total = $countStmt->fetchColumn();
 
-            // data
             $stmt = $pdo->prepare("SELECT * FROM visitors $where ORDER BY created_at DESC LIMIT $limit OFFSET $offset");
             $stmt->execute($params);
             $list = $stmt->fetchAll();
@@ -162,21 +252,123 @@ try {
             break;
 
         case 'stats':
-            // 今日访问统计
             $today = date('Y-m-d');
-            $todayStmt = $pdo->prepare("SELECT COUNT(*) FROM visitors WHERE DATE(created_at) = :today");
-            $todayStmt->execute([':today' => $today]);
-            $todayCount = $todayStmt->fetchColumn();
 
-            // 总访问量
             $totalStmt = $pdo->query("SELECT COUNT(*) FROM visitors");
-            $totalCount = $totalStmt->fetchColumn();
+            $totalOps = (int)$totalStmt->fetchColumn();
+
+            $realStmt = $pdo->query("SELECT COUNT(*) FROM visitors WHERE is_bot = 0");
+            $totalReal = (int)$realStmt->fetchColumn();
+
+            $todayOpsStmt = $pdo->prepare("SELECT COUNT(*) FROM visitors WHERE DATE(created_at) = :today");
+            $todayOpsStmt->execute([':today' => $today]);
+            $todayOps = (int)$todayOpsStmt->fetchColumn();
+
+            $todayRealStmt = $pdo->prepare("SELECT COUNT(*) FROM visitors WHERE DATE(created_at) = :today AND is_bot = 0");
+            $todayRealStmt->execute([':today' => $today]);
+            $todayReal = (int)$todayRealStmt->fetchColumn();
+
+            $botBreakdown = [
+                'search_engine' => 0,
+                'stress_tool' => 0,
+                'malicious_refresh' => 0,
+                'manual' => 0,
+            ];
+            $botStmt = $pdo->query("SELECT bot_type, COUNT(*) AS cnt FROM visitors WHERE is_bot = 1 GROUP BY bot_type");
+            foreach ($botStmt->fetchAll() as $row) {
+                $t = $row['bot_type'] ?: 'manual';
+                if (!isset($botBreakdown[$t])) $botBreakdown[$t] = 0;
+                $botBreakdown[$t] = (int)$row['cnt'];
+            }
+
+            $todayBotStmt = $pdo->prepare("SELECT bot_type, COUNT(*) AS cnt FROM visitors WHERE DATE(created_at) = :today AND is_bot = 1 GROUP BY bot_type");
+            $todayBotStmt->execute([':today' => $today]);
+            $todayBotBreakdown = [
+                'search_engine' => 0,
+                'stress_tool' => 0,
+                'malicious_refresh' => 0,
+                'manual' => 0,
+            ];
+            foreach ($todayBotStmt->fetchAll() as $row) {
+                $t = $row['bot_type'] ?: 'manual';
+                if (!isset($todayBotBreakdown[$t])) $todayBotBreakdown[$t] = 0;
+                $todayBotBreakdown[$t] = (int)$row['cnt'];
+            }
 
             echo json_encode([
                 'status' => 'success',
-                'total' => $totalCount,
-                'today' => $todayCount
+                'ops_total' => $totalOps,
+                'ops_today' => $todayOps,
+                'real_total' => $totalReal,
+                'real_today' => $todayReal,
+                'bot_total' => $totalOps - $totalReal,
+                'bot_today' => $todayOps - $todayReal,
+                'bot_breakdown' => $botBreakdown,
+                'today_bot_breakdown' => $todayBotBreakdown,
+                'total' => $totalReal,
+                'today' => $todayReal,
             ]);
+            break;
+
+        case 'detail':
+            $id = (int)($_GET['id'] ?? 0);
+            if (!$id) throw new Exception('ID required');
+            $stmt = $pdo->prepare("SELECT * FROM visitors WHERE id = :id");
+            $stmt->execute([':id' => $id]);
+            $row = $stmt->fetch();
+            if (!$row) throw new Exception('Not found');
+
+            $auditStmt = $pdo->prepare("SELECT * FROM bot_audit_log WHERE visitor_id = :id ORDER BY created_at DESC");
+            $auditStmt->execute([':id' => $id]);
+            $row['audit_logs'] = $auditStmt->fetchAll();
+
+            echo json_encode(['status' => 'success', 'data' => $row]);
+            break;
+
+        case 'mark_bot':
+            if ($_SERVER['REQUEST_METHOD'] !== 'POST') throw new Exception('Invalid method');
+            $input = json_decode(file_get_contents('php://input'), true);
+            $id = (int)($input['id'] ?? 0);
+            $isBot = (int)($input['is_bot'] ?? 0);
+            $botType = $input['bot_type'] ?? '';
+            $reason = $input['reason'] ?? '';
+            $evidence = $input['evidence'] ?? '';
+            $operator = $input['operator'] ?? 'admin';
+
+            if (!$id) throw new Exception('ID required');
+
+            $stmt = $pdo->prepare("SELECT * FROM visitors WHERE id = :id");
+            $stmt->execute([':id' => $id]);
+            $old = $stmt->fetch();
+            if (!$old) throw new Exception('Not found');
+
+            $oldIsBot = (int)$old['is_bot'];
+            $oldBotType = $old['bot_type'] ?? '';
+
+            $upd = $pdo->prepare("UPDATE visitors SET is_bot = :is_bot, bot_type = :bot_type, bot_reason = :reason, bot_evidence = :evidence, bot_verified_by = :operator, bot_verified_at = :vat WHERE id = :id");
+            $upd->execute([
+                ':is_bot' => $isBot,
+                ':bot_type' => $botType,
+                ':reason' => $reason,
+                ':evidence' => is_array($evidence) ? json_encode($evidence, JSON_UNESCAPED_UNICODE) : $evidence,
+                ':operator' => $operator,
+                ':vat' => date('Y-m-d H:i:s'),
+                ':id' => $id,
+            ]);
+
+            $ins = $pdo->prepare("INSERT INTO bot_audit_log (visitor_id, old_is_bot, old_bot_type, new_is_bot, new_bot_type, reason, evidence, operator) VALUES (:vid, :oib, :obt, :nib, :nbt, :reason, :evidence, :operator)");
+            $ins->execute([
+                ':vid' => $id,
+                ':oib' => $oldIsBot,
+                ':obt' => $oldBotType,
+                ':nib' => $isBot,
+                ':nbt' => $botType,
+                ':reason' => $reason,
+                ':evidence' => is_array($evidence) ? json_encode($evidence, JSON_UNESCAPED_UNICODE) : $evidence,
+                ':operator' => $operator,
+            ]);
+
+            echo json_encode(['status' => 'success']);
             break;
 
         default:

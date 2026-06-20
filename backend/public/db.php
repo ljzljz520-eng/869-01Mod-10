@@ -39,39 +39,79 @@ class Database
             city TEXT,
             isp TEXT,
             user_agent TEXT,
-            
+
             browser TEXT,
             browser_version TEXT,
             os TEXT,
             os_version TEXT,
             device_type TEXT,
-            
+
             screen_width INTEGER,
             screen_height INTEGER,
             window_width INTEGER,
             window_height INTEGER,
-            
+
             language TEXT,
             timezone TEXT,
             platform TEXT,
             cookie_enabled INTEGER,
-            
+
             touch_points INTEGER,
             device_memory REAL,
             cpu_cores INTEGER,
             connection_type TEXT,
-            
+
             referrer TEXT,
             remark TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+
+            is_bot INTEGER DEFAULT 0,
+            bot_type TEXT DEFAULT '',
+            bot_reason TEXT DEFAULT '',
+            bot_evidence TEXT DEFAULT '',
+            bot_verified_by TEXT DEFAULT '',
+            bot_verified_at DATETIME
         )";
 
         self::$pdo->exec($sql);
 
-        // 检查是否需要插入演示数据
+        self::migrateAddBotColumns();
+
+        $auditSql = "CREATE TABLE IF NOT EXISTS bot_audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            visitor_id INTEGER NOT NULL,
+            old_is_bot INTEGER DEFAULT 0,
+            old_bot_type TEXT DEFAULT '',
+            new_is_bot INTEGER DEFAULT 0,
+            new_bot_type TEXT DEFAULT '',
+            reason TEXT DEFAULT '',
+            evidence TEXT DEFAULT '',
+            operator TEXT DEFAULT '',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )";
+        self::$pdo->exec($auditSql);
+
         $count = self::$pdo->query("SELECT COUNT(*) FROM visitors")->fetchColumn();
         if ($count == 0) {
             self::seedData();
+        }
+    }
+
+    private static function migrateAddBotColumns()
+    {
+        $columns = [
+            'is_bot' => "INTEGER DEFAULT 0",
+            'bot_type' => "TEXT DEFAULT ''",
+            'bot_reason' => "TEXT DEFAULT ''",
+            'bot_evidence' => "TEXT DEFAULT ''",
+            'bot_verified_by' => "TEXT DEFAULT ''",
+            'bot_verified_at' => "DATETIME",
+        ];
+        foreach ($columns as $col => $def) {
+            try {
+                self::$pdo->exec("ALTER TABLE visitors ADD COLUMN $col $def");
+            } catch (\Exception $e) {
+            }
         }
     }
 
