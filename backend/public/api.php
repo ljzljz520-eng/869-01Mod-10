@@ -193,8 +193,22 @@ try {
 
             $stmt = $pdo->prepare($sql);
             $stmt->execute($data);
+            $newId = (int)$pdo->lastInsertId();
 
-            echo json_encode(['status' => 'success', 'id' => $pdo->lastInsertId()]);
+            if ($isBot && $botType === 'malicious_refresh' && $ip) {
+                $windowAgo = date('Y-m-d H:i:s', time() - 600);
+                $batchEvidence = json_encode(array_merge($botEvidence, ['bulk_marked' => true, 'trigger_id' => $newId]), JSON_UNESCAPED_UNICODE);
+                $upd = $pdo->prepare("UPDATE visitors SET is_bot = 1, bot_type = 'malicious_refresh', bot_reason = :reason, bot_evidence = :evidence, bot_verified_by = 'system_auto', bot_verified_at = :vat WHERE ip = :ip AND created_at >= :t AND (is_bot = 0 OR bot_verified_by = 'system_auto')");
+                $upd->execute([
+                    ':reason' => $botReason,
+                    ':evidence' => $batchEvidence,
+                    ':vat' => date('Y-m-d H:i:s'),
+                    ':ip' => $ip,
+                    ':t' => $windowAgo,
+                ]);
+            }
+
+            echo json_encode(['status' => 'success', 'id' => $newId]);
             break;
 
         case 'list':
@@ -331,11 +345,13 @@ try {
             $id = (int)($input['id'] ?? 0);
             $isBot = (int)($input['is_bot'] ?? 0);
             $botType = $input['bot_type'] ?? '';
-            $reason = $input['reason'] ?? '';
-            $evidence = $input['evidence'] ?? '';
-            $operator = $input['operator'] ?? 'admin';
+            $reason = trim($input['reason'] ?? '');
+            $evidence = trim($input['evidence'] ?? '');
+            $operator = trim($input['operator'] ?? 'admin');
 
             if (!$id) throw new Exception('ID required');
+            if (!$reason) throw new Exception('改判理由不能为空');
+            if (!$evidence) throw new Exception('证据留痕不能为空，请提供判定依据（如 UA 片段、日志、工单号等）');
 
             $stmt = $pdo->prepare("SELECT * FROM visitors WHERE id = :id");
             $stmt->execute([':id' => $id]);
@@ -344,13 +360,29 @@ try {
 
             $oldIsBot = (int)$old['is_bot'];
             $oldBotType = $old['bot_type'] ?? '';
+            $oldEvidence = $old['bot_evidence'] ?? '';
+
+            $mergedEvidence = [
+                'manual_evidence' => $evidence,
+                'manual_operator' => $operator,
+                'manual_reason' => $reason,
+                'manual_at' => date('Y-m-d H:i:s'),
+            ];
+            if ($oldEvidence) {
+                $mergedEvidence['original_evidence'] = $oldEvidence;
+                $mergedEvidence['original_is_bot'] = $oldIsBot;
+                $mergedEvidence['original_bot_type'] = $oldBotType;
+                $mergedEvidence['original_reason'] = $old['bot_reason'] ?? '';
+                $mergedEvidence['original_verified_by'] = $old['bot_verified_by'] ?? '';
+            }
+            $finalEvidence = json_encode($mergedEvidence, JSON_UNESCAPED_UNICODE);
 
             $upd = $pdo->prepare("UPDATE visitors SET is_bot = :is_bot, bot_type = :bot_type, bot_reason = :reason, bot_evidence = :evidence, bot_verified_by = :operator, bot_verified_at = :vat WHERE id = :id");
             $upd->execute([
                 ':is_bot' => $isBot,
-                ':bot_type' => $botType,
+                ':bot_type' => $isBot ? $botType : '',
                 ':reason' => $reason,
-                ':evidence' => is_array($evidence) ? json_encode($evidence, JSON_UNESCAPED_UNICODE) : $evidence,
+                ':evidence' => $finalEvidence,
                 ':operator' => $operator,
                 ':vat' => date('Y-m-d H:i:s'),
                 ':id' => $id,
@@ -362,9 +394,9 @@ try {
                 ':oib' => $oldIsBot,
                 ':obt' => $oldBotType,
                 ':nib' => $isBot,
-                ':nbt' => $botType,
+                ':nbt' => $isBot ? $botType : '',
                 ':reason' => $reason,
-                ':evidence' => is_array($evidence) ? json_encode($evidence, JSON_UNESCAPED_UNICODE) : $evidence,
+                ':evidence' => $finalEvidence,
                 ':operator' => $operator,
             ]);
 

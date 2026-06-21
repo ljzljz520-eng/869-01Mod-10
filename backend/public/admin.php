@@ -67,8 +67,11 @@
                         <i class="ri-robot-line mr-1"></i> 已剔除机器人流量
                     </div>
                     <div class="text-2xl font-bold text-orange-600">
-                        {{ viewMode === 'ops' ? stats.bot_total : 0 }}
+                        {{ stats.bot_total }}
                         <span class="text-xs ml-1 font-normal text-orange-500">今日 {{ stats.bot_today }}</span>
+                    </div>
+                    <div v-if="viewMode === 'dev'" class="text-xs text-orange-500 mt-1">
+                        运维视图统计总量已包含这些流量
                     </div>
                 </div>
                 <div v-if="viewMode === 'ops' && stats.bot_total > 0" class="bg-amber-50 p-6 rounded-xl shadow-sm border border-amber-100 cursor-pointer hover:bg-amber-100 transition"
@@ -385,9 +388,15 @@
                         </div>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-2">证据留痕（可选）</label>
-                        <textarea v-model="markBotForm.evidence_text" rows="2" placeholder="粘贴 UA、日志、截图描述等证据..."
+                        <label class="block text-sm font-medium text-gray-700 mb-2">
+                            证据留痕 <span class="text-red-500">*</span>
+                        </label>
+                        <textarea v-model="markBotForm.evidence_text" rows="2" placeholder="必填：粘贴 UA、日志、工单号、截图说明等判定依据..."
                             class="w-full border rounded-lg p-3 focus:ring-2 focus:ring-blue-500"></textarea>
+                        <div class="text-xs text-gray-500 mt-1">
+                            <i class="ri-shield-check-line mr-1"></i>
+                            系统会自动合并原始识别证据，与人工证据一并写入审计日志。
+                        </div>
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-2">操作人</label>
@@ -400,7 +409,7 @@
                         class="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded">取消</button>
                     <button @click="submitMarkBot"
                         :class="['px-4 py-2 text-white rounded', markBotForm.is_bot ? 'bg-orange-600 hover:bg-orange-700' : 'bg-green-600 hover:bg-green-700']"
-                        :disabled="!markBotForm.reason.trim()">
+                        :disabled="!markBotForm.reason.trim() || !markBotForm.evidence_text.trim()">
                         <i class="ri-save-line mr-1"></i> 提交并留痕
                     </button>
                 </div>
@@ -680,13 +689,17 @@
                         alert('请填写改判理由');
                         return;
                     }
+                    if (!markBotForm.evidence_text.trim()) {
+                        alert('请填写证据留痕（必填）');
+                        return;
+                    }
                     try {
                         const payload = {
                             id: markBotForm.id,
                             is_bot: markBotForm.is_bot ? 1 : 0,
                             bot_type: markBotForm.is_bot ? markBotForm.bot_type : '',
                             reason: markBotForm.reason,
-                            evidence: markBotForm.evidence_text || '',
+                            evidence: markBotForm.evidence_text,
                             operator: markBotForm.operator || 'admin',
                         };
                         const res = await fetch('/api.php?action=mark_bot', {
